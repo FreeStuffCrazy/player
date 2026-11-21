@@ -202,8 +202,9 @@ export async function createPlexSource({ id = 'plex', config, plugins, store, pi
     quality = normalizeQuality(quality);
     const tier = qualityTiers(config.plex.videoBitrate)[quality];
     return new URLSearchParams({
-      // A chosen subtitle track is drawn into the picture by the transcoder.
-      ...(subtitle ? { subtitles: 'burn', subtitleStreamID: subtitle } : {}),
+      // A chosen subtitle track is drawn into the picture by the transcoder (see selectSubtitle). Without
+      // one, a track chosen in another Plex app is left out.
+      ...(subtitle ? { subtitles: 'burn', subtitleStreamID: subtitle } : { subtitles: 'none' }),
       hasMDE: '1',
       path,
       mediaIndex: '0',
@@ -261,7 +262,11 @@ export async function createPlexSource({ id = 'plex', config, plugins, store, pi
     const subtitle = typeof req.query.subtitle === 'string' && TRACK_ID.test(req.query.subtitle) ? req.query.subtitle : null;
     // A track is not a video: Plex plays it through its music transcoder. Which one is asked of the item
     // itself; if that cannot be read, it is treated as video, as before.
-    const kind = (await libraryFor(token, plexUrl).itemDetails(itemId).catch(() => null))?.type === 'track' ? 'music' : 'video';
+    const lib = libraryFor(token, plexUrl);
+    const kind = (await lib.itemDetails(itemId).catch(() => null))?.type === 'track' ? 'music' : 'video';
+    if (kind === 'video' && subtitle) {
+      await lib.selectSubtitle(itemId, subtitle).catch(error => console.warn('Plex subtitle selection failed:', error.message));
+    }
     timing.details = performance.now();
     const params = kind === 'music'
       ? plexMusicParams(`/library/metadata/${itemId}`, sessionId, qualityTierFor(req.query.quality))
