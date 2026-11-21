@@ -267,13 +267,14 @@ export async function createPlexSource({ id = 'plex', config, plugins, store, pi
     // itself; if that cannot be read, it is treated as video, as before.
     const lib = libraryFor(token, plexUrl);
     const kind = (await lib.itemDetails(itemId).catch(() => null))?.type === 'track' ? 'music' : 'video';
-    if (kind === 'video' && subtitle) {
-      await lib.selectSubtitle(itemId, subtitle).catch(error => console.warn('Plex subtitle selection failed:', error.message));
-    }
+    // Plex burns whichever track is selected on the file, so burn is asked for only once the chosen one
+    // is; otherwise the stream plays without subtitles rather than with another track.
+    const burn = kind === 'video' && subtitle
+      && await lib.selectSubtitle(itemId, subtitle).catch(error => { console.warn('Plex subtitle selection failed:', error.message); return false; });
     timing.details = performance.now();
     const params = kind === 'music'
       ? plexMusicParams(`/library/metadata/${itemId}`, sessionId, qualityTierFor(req.query.quality), { sourceRate: req.query.rate === 'source' })
-      : plexTranscodeParams(`/library/metadata/${itemId}`, sessionId, qualityTierFor(req.query.quality), subtitle);
+      : plexTranscodeParams(`/library/metadata/${itemId}`, sessionId, qualityTierFor(req.query.quality), burn ? subtitle : null);
 
     const decisionRes = await fetch(`${plexUrl}/${kind}/:/transcode/universal/decision?${params}`, {
       headers: { ...plexHeaders(token), Accept: 'application/json' },
