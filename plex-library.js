@@ -250,17 +250,20 @@ export function createPlexLibrary({ plexUrl, token, clientId, productName = 'Fre
 
   // Plex burns in the subtitle chosen on the file for the account playing it, not the one a
   // transcode request names, so a track to burn is chosen there first, as Plex's own apps do.
-  // Plex's other apps then show that choice for this item too.
+  // Plex's other apps then show that choice for this item too. True once the track is the one
+  // selected; false if it is not one of the item's tracks.
   async function selectSubtitle(id, trackId) {
     const { partId, streams } = await subtitlePart(id);
     const stream = streams.find(candidate => String(candidate.id) === String(trackId));
-    if (!stream || !TRACK_ID.test(String(partId)) || stream.selected === true || stream.selected === 1) return;
+    if (!stream || !TRACK_ID.test(String(partId))) return false;
+    if (stream.selected === true || stream.selected === 1) return true;
     const headers = { 'X-Plex-Token': token, ...plexDeviceHeaders(productName) };
     if (clientId) headers['X-Plex-Client-Identifier'] = clientId;
     const params = new URLSearchParams({ subtitleStreamID: String(stream.id), allParts: '1' });
     const res = await fetch(`${plexUrl}/library/parts/${partId}?${params}`, { method: 'PUT', headers, redirect: 'error', signal: AbortSignal.timeout(10000) });
     await res.body?.cancel();
     if (!res.ok) throw new Error(`Plex subtitle selection ${res.status}`);
+    return true;
   }
 
   // Plex's longer title says which file a track is in, "English (SRT External)" next to

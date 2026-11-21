@@ -28,6 +28,7 @@ const streams = [
 const originalFetch = globalThis.fetch;
 const calls = [];
 let pinSequence = 800;
+let plexRefusesSelection = false;
 globalThis.fetch = async (value, options = {}) => {
   const url = new URL(value);
   calls.push({ url, options });
@@ -44,7 +45,7 @@ globalThis.fetch = async (value, options = {}) => {
   if (p === '/library/metadata/8') return json({ MediaContainer: { Metadata: [{ ratingKey: '8', type: 'movie', title: 'Silent', duration: 100000, Media: [{ Part: [{ Stream: [] }] }] }] } });
   if (p === '/library/streams/11') return new Response(SRT, { headers: { 'Content-Type': 'application/x-subrip' } });
   if (p === '/library/streams/14') return new Response('[Script Info]', { headers: { 'Content-Type': 'text/plain' } });
-  if (p === '/library/parts/70' && options.method === 'PUT') return new Response('');
+  if (p === '/library/parts/70' && options.method === 'PUT') return new Response('', { status: plexRefusesSelection ? 500 : 200 });
   if (p === '/video/:/transcode/universal/decision') return json({ MediaContainer: {} });
   if (p === '/video/:/transcode/universal/start.m3u8') return new Response(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nsession/${url.searchParams.get('session')}/base/index.m3u8\n`, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
   if (p === '/video/:/transcode/universal/stop') return new Response('');
@@ -154,9 +155,28 @@ test('a chosen subtitle track is burned into the stream, and only a real track I
   assert.ok(calls.indexOf(selection) < calls.findLastIndex(call => call.url.pathname === '/video/:/transcode/universal/decision'));
   await startedWith({ playbackId: 'cc-2b', extra: '&subtitle=15' });
   assert.equal(selections().length, 1, 'a track already chosen is not chosen again');
-  await startedWith({ playbackId: 'cc-2c', extra: '&subtitle=999' });
+  const notOnItem = await startedWith({ playbackId: 'cc-2c', extra: '&subtitle=999' });
   assert.equal(selections().length, 1, 'only one of the item\'s own tracks is chosen');
+  assert.equal(notOnItem.get('subtitles'), 'none', 'a track that is not the item\'s would burn whichever one is selected');
   const junk = await startedWith({ playbackId: 'cc-3', extra: '&subtitle=12%26path%3D%2Fx' });
   assert.equal(junk.get('subtitles'), 'none', 'anything but digits is ignored');
   assert.equal(junk.get('path'), '/library/metadata/7');
+});
+
+test('when Plex refuses the selection, the track selected before is not burned in its place', async () => {
+  const cookie = await signIn();
+  plexRefusesSelection = true;
+  try {
+    const before = calls.length;
+    // Track 15 is the one selected on the file; the viewer asks for 12.
+    const started = await request('/api/start?key=7&quality=low&playbackId=cc-refused&subtitle=12', { cookie });
+    assert.equal(started.status, 200, started.text);
+    const made = calls.slice(before);
+    assert.equal(made.filter(call => call.url.pathname === '/library/parts/70').length, 1, 'the selection was tried');
+    const decision = made.find(call => call.url.pathname === '/video/:/transcode/universal/decision').url.searchParams;
+    assert.equal(decision.get('subtitles'), 'none');
+    assert.equal(decision.get('subtitleStreamID'), null);
+  } finally {
+    plexRefusesSelection = false;
+  }
 });
