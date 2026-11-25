@@ -255,16 +255,46 @@ export function createPlexLibrary({ plexUrl, token, clientId, productName = 'Fre
   // An item's subtitle streams. One Plex can hand over as a text file (an external
   // SubRip file) is `text`; the rest, including every one inside the video file, can
   // only be drawn into the picture by the transcoder, so they are `burn`.
-  async function subtitleStreams(id) {
+  async function subtitlePart(id) {
     const data = await plexApi(`/library/metadata/${encodeURIComponent(id)}`);
     const part = data.MediaContainer.Metadata?.[0]?.Media?.[0]?.Part?.[0];
-    return (part?.Stream || []).filter(stream => stream.streamType === 3 && TRACK_ID.test(String(stream.id)));
+    return { partId: part?.id, streams: (part?.Stream || []).filter(stream => stream.streamType === 3 && TRACK_ID.test(String(stream.id))) };
   }
+
+  async function subtitleStreams(id) {
+    return (await subtitlePart(id)).streams;
+  }
+
+  // Plex burns in the subtitle chosen on the file for the account playing it, not the one a
+  // transcode request names, so a track to burn is chosen there first, as Plex's own apps do.
+  // Plex's other apps then show that choice for this item too. True once the track is the one
+  // selected; false if it is not one of the item's tracks.
+  async function selectSubtitle(id, trackId) {
+    const { partId, streams } = await subtitlePart(id);
+    const stream = streams.find(candidate => String(candidate.id) === String(trackId));
+    if (!stream || !TRACK_ID.test(String(partId))) return false;
+    if (stream.selected === true || stream.selected === 1) return true;
+    const headers = { 'X-Plex-Token': token, ...plexDeviceHeaders(productName) };
+    if (clientId) headers['X-Plex-Client-Identifier'] = clientId;
+    const params = new URLSearchParams({ subtitleStreamID: String(stream.id), allParts: '1' });
+    const res = await fetch(`${plexUrl}/library/parts/${partId}?${params}`, { method: 'PUT', headers, redirect: 'error', signal: AbortSignal.timeout(10000) });
+    await res.body?.cancel();
+    if (!res.ok) throw new Error(`Plex subtitle selection ${res.status}`);
+    return true;
+  }
+
+  // Plex's longer title says which file a track is in, "English (SRT External)" next to
+  // "English (SRT)". A track with no title of its own gets one like " (English SRT)", which reads
+  // worse than the short one.
+  const subtitleLabel = stream => {
+    const extended = String(stream.extendedDisplayTitle || '').trim();
+    return extended && !extended.startsWith('(') ? extended : stream.displayTitle || extended || stream.language;
+  };
 
   async function subtitleTracks(id) {
     return orderTracks((await subtitleStreams(id)).map(stream => describeTrack({
       id: stream.id,
-      label: stream.displayTitle || stream.extendedDisplayTitle || stream.language,
+      label: subtitleLabel(stream),
       language: stream.languageCode || stream.languageTag,
       kind: typeof stream.key === 'string' && stream.key.startsWith('/library/streams/') && TEXT_FORMATS.has(String(stream.codec || stream.format).toLowerCase()) ? 'text' : 'burn',
       forced: stream.forced === true || stream.forced === 1,
@@ -536,7 +566,7 @@ export function createPlexLibrary({ plexUrl, token, clientId, productName = 'Fre
   }
 
   return {
-    subtitleTracks, subtitleText, lyricTracks, lyricText, playlists, playlistItems, similarArtists, popularTracks, similarTracks,
+    subtitleTracks, subtitleText, selectSubtitle, lyricTracks, lyricText, playlists, playlistItems, similarArtists, popularTracks, similarTracks,
     libraries, libraryItems, showEpisodes, showSeasons, seasonEpisodes, itemDetails, hubContinueWatching, recentlyAdded, search, thumbnailUpstreamUrl,
     accounts, historyForAccount, continueWatchingForAccount,
   };

@@ -19,7 +19,8 @@ Object.assign(process.env, {
 const SRT = '1\r\n00:00:01,500 --> 00:00:03,000\r\nHello <i>there</i>\r\n\r\n2\r\n00:00:04,000 --> 00:00:05,250\r\nSecond line\r\nwraps\r\n';
 const streams = [
   { id: 11, streamType: 3, codec: 'srt', format: 'srt', key: '/library/streams/11', languageCode: 'eng', displayTitle: 'English (SRT External)' },
-  { id: 12, streamType: 3, codec: 'srt', languageCode: 'spa', displayTitle: 'Spanish (SRT)' },
+  { id: 12, streamType: 3, codec: 'srt', languageCode: 'spa', displayTitle: 'Spanish', extendedDisplayTitle: 'Spanish (SRT)' },
+  { id: 15, streamType: 3, codec: 'srt', languageCode: 'eng', displayTitle: 'English', extendedDisplayTitle: ' (English SRT)', selected: true },
   { id: 13, streamType: 3, codec: 'pgs', languageCode: 'fre', displayTitle: 'French (PGS)', forced: true },
   { id: 14, streamType: 3, codec: 'ass', format: 'ass', key: '/library/streams/14', languageCode: 'ger', displayTitle: 'German (ASS External)' },
   { id: 20, streamType: 2, codec: 'aac', languageCode: 'eng' },
@@ -27,6 +28,7 @@ const streams = [
 const originalFetch = globalThis.fetch;
 const calls = [];
 let pinSequence = 800;
+let plexRefusesSelection = false;
 globalThis.fetch = async (value, options = {}) => {
   const url = new URL(value);
   calls.push({ url, options });
@@ -39,10 +41,11 @@ globalThis.fetch = async (value, options = {}) => {
   if (p === '/api/v2/home/users') return json({ users: [{ id: 10, title: 'Owner', admin: true }] });
   if (p === '/api/v2/user') return json({ id: 1, username: 'Owner', email: 'Owner@Example.test', confirmed: true });
   if (p === '/api/v2/resources') return json([{ clientIdentifier: 'test-server', provides: 'server', owned: true, accessToken: 'test-server-token', connections: [{ uri: 'https://plex.example', relay: false }] }]);
-  if (p === '/library/metadata/7') return json({ MediaContainer: { Metadata: [{ ratingKey: '7', type: 'movie', title: 'Subtitled', duration: 100000, Media: [{ Part: [{ Stream: streams }] }] }] } });
+  if (p === '/library/metadata/7') return json({ MediaContainer: { Metadata: [{ ratingKey: '7', type: 'movie', title: 'Subtitled', duration: 100000, Media: [{ Part: [{ id: 70, Stream: streams }] }] }] } });
   if (p === '/library/metadata/8') return json({ MediaContainer: { Metadata: [{ ratingKey: '8', type: 'movie', title: 'Silent', duration: 100000, Media: [{ Part: [{ Stream: [] }] }] }] } });
   if (p === '/library/streams/11') return new Response(SRT, { headers: { 'Content-Type': 'application/x-subrip' } });
   if (p === '/library/streams/14') return new Response('[Script Info]', { headers: { 'Content-Type': 'text/plain' } });
+  if (p === '/library/parts/70' && options.method === 'PUT') return new Response('', { status: plexRefusesSelection ? 500 : 200 });
   if (p === '/video/:/transcode/universal/decision') return json({ MediaContainer: {} });
   if (p === '/video/:/transcode/universal/start.m3u8') return new Response(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nsession/${url.searchParams.get('session')}/base/index.m3u8\n`, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
   if (p === '/video/:/transcode/universal/stop') return new Response('');
@@ -96,7 +99,7 @@ test('an item lists its subtitle tracks: a file Plex hands over is text, the res
   const listed = await request('/api/library/subtitles/7', { cookie });
   assert.equal(listed.status, 200, listed.text);
   const byId = Object.fromEntries(listed.json.tracks.map(track => [track.id, track]));
-  assert.deepEqual(Object.keys(byId).sort(), ['11', '12', '13', '14'], 'only subtitle streams, never the audio one');
+  assert.deepEqual(Object.keys(byId).sort(), ['11', '12', '13', '14', '15'], 'only subtitle streams, never the audio one');
   assert.equal(byId[11].kind, 'text');
   assert.equal(byId[11].language, 'eng');
   assert.equal(byId[12].kind, 'burn', 'a subtitle inside the video file cannot be fetched as text');
@@ -104,6 +107,8 @@ test('an item lists its subtitle tracks: a file Plex hands over is text, the res
   assert.equal(byId[13].forced, true);
   assert.equal(byId[13].language, 'fra', 'French is the same language under either of its codes');
   assert.equal(byId[14].kind, 'burn', 'a format the player cannot read is drawn by the server');
+  assert.equal(byId[12].label, 'Spanish (SRT)', 'the longer title tells a track in the file from a separate one');
+  assert.equal(byId[15].label, 'English', 'a longer title with no name of its own is not used');
   assert.equal(listed.json.tracks[0].kind, 'text', 'text tracks come first');
   assert.ok(!/library\/streams|token/i.test(listed.text), 'no server paths or tokens reach the page');
   assert.deepEqual((await request('/api/library/subtitles/8', { cookie })).json, { tracks: [] });
@@ -133,13 +138,45 @@ test('a chosen subtitle track is burned into the stream, and only a real track I
     assert.equal(started.status, 200, started.text);
     return calls.filter(call => call.url.pathname === '/video/:/transcode/universal/decision').at(-1).url.searchParams;
   };
+  const selections = () => calls.filter(call => call.url.pathname.startsWith('/library/parts/'));
   const plain = await startedWith({ playbackId: 'cc-1' });
-  assert.equal(plain.get('subtitles'), null);
+  assert.equal(plain.get('subtitles'), 'none', 'a track chosen in another Plex app is left out');
   assert.equal(plain.get('subtitleStreamID'), null);
+  assert.equal(selections().length, 0, 'turning captions off leaves the choice on the file alone');
   const burned = await startedWith({ playbackId: 'cc-2', extra: '&subtitle=12' });
   assert.equal(burned.get('subtitles'), 'burn');
   assert.equal(burned.get('subtitleStreamID'), '12');
+  // Plex burns the track chosen on the file, so it is chosen there before the stream starts.
+  const [selection] = selections();
+  assert.equal(selection.options.method, 'PUT');
+  assert.equal(selection.url.searchParams.get('subtitleStreamID'), '12');
+  assert.equal(selection.url.searchParams.get('allParts'), '1');
+  assert.equal(selection.options.headers['X-Plex-Token'], 'test-server-token');
+  assert.ok(calls.indexOf(selection) < calls.findLastIndex(call => call.url.pathname === '/video/:/transcode/universal/decision'));
+  await startedWith({ playbackId: 'cc-2b', extra: '&subtitle=15' });
+  assert.equal(selections().length, 1, 'a track already chosen is not chosen again');
+  const notOnItem = await startedWith({ playbackId: 'cc-2c', extra: '&subtitle=999' });
+  assert.equal(selections().length, 1, 'only one of the item\'s own tracks is chosen');
+  assert.equal(notOnItem.get('subtitles'), 'none', 'a track that is not the item\'s would burn whichever one is selected');
   const junk = await startedWith({ playbackId: 'cc-3', extra: '&subtitle=12%26path%3D%2Fx' });
-  assert.equal(junk.get('subtitles'), null, 'anything but digits is ignored');
+  assert.equal(junk.get('subtitles'), 'none', 'anything but digits is ignored');
   assert.equal(junk.get('path'), '/library/metadata/7');
+});
+
+test('when Plex refuses the selection, the track selected before is not burned in its place', async () => {
+  const cookie = await signIn();
+  plexRefusesSelection = true;
+  try {
+    const before = calls.length;
+    // Track 15 is the one selected on the file; the viewer asks for 12.
+    const started = await request('/api/start?key=7&quality=low&playbackId=cc-refused&subtitle=12', { cookie });
+    assert.equal(started.status, 200, started.text);
+    const made = calls.slice(before);
+    assert.equal(made.filter(call => call.url.pathname === '/library/parts/70').length, 1, 'the selection was tried');
+    const decision = made.find(call => call.url.pathname === '/video/:/transcode/universal/decision').url.searchParams;
+    assert.equal(decision.get('subtitles'), 'none');
+    assert.equal(decision.get('subtitleStreamID'), null);
+  } finally {
+    plexRefusesSelection = false;
+  }
 });
